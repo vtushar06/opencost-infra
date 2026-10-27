@@ -15,14 +15,14 @@ opencost:
           sectionName: https-opencost-ui
       hostnames:
         - demo.infra.opencost.io
-    image:
-      fullImageName: ghcr.io/opencost/opencost-ui:test-41370af
     resources:
       requests:
         cpu: 100m
         memory: 2Gi
       limits:
         memory: 2Gi
+    image:
+      fullImageName: ghcr.io/opencost/opencost-ui:develop-4043d0e
   mcp:
     httpRoute:
       enabled: true
@@ -39,8 +39,6 @@ opencost:
   exporter:
     prometheusDataSource:
       queryResolutionSeconds: "60"
-    image:
-      fullImageName: ghcr.io/opencost/opencost:develop-44016ce
     adminToken:
       enabled: true
       existingSecret: "opencost-admin-token"
@@ -51,6 +49,8 @@ opencost:
         memory: 70Gi
       limits:
         memory: 70Gi
+    image:
+      fullImageName: ghcr.io/opencost/opencost:develop-47ef511
   cloudIntegrationSecret: "opencost-cloud-integration"
   cloudCost:
     enabled: true

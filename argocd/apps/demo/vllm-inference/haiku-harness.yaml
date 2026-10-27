@@ -1,0 +1,208 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haiku-harness-script
+  namespace: vllm-inference
+data:
+  run-harness.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    VLLM_ENDPOINT="${VLLM_ENDPOINT:-http://vllm-inference:8000/v1/chat/completions}"
+    CONCURRENCY="${CONCURRENCY:-3}"
+    ITERATIONS="${ITERATIONS:-20}"
+    MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
+
+    echo "Starting haiku load harness"
+    echo "Endpoint: ${VLLM_ENDPOINT}"
+    echo "Concurrency: ${CONCURRENCY}"
+    echo "Iterations: ${ITERATIONS}"
+    echo "Model: ${MODEL}"
+    echo "---"
+
+    # Function to make a single request
+    make_request() {
+      local id=$1
+      local prompt="Write a haiku about ${TOPICS[$((id % ${#TOPICS[@]}))]}"
+      
+      response=$(curl -s -X POST "${VLLM_ENDPOINT}" \
+        -H "Content-Type: application/json" \
+        -d "{
+          \"model\": \"${MODEL}\",
+          \"messages\": [
+            {\"role\": \"system\", \"content\": \"You are a haiku poet. Write only haikus.\"},
+            {\"role\": \"user\", \"content\": \"${prompt}\"}
+          ],
+          \"max_tokens\": 50,
+          \"temperature\": 0.8
+        }" 2>&1)
+      
+      if echo "$response" | grep -q '"choices"'; then
+        echo "[$(date +%H:%M:%S)] Request ${id}: SUCCESS"
+        echo "$response" | grep -o '"content":"[^"]*"' | head -1 | cut -d'"' -f4
+        echo "---"
+      else
+        echo "[$(date +%H:%M:%S)] Request ${id}: FAILED"
+        echo "$response"
+        echo "---"
+      fi
+    }
+
+    # Topics for haikus
+    TOPICS=(
+      "kubernetes"
+      "clouds"
+      "GPU acceleration"
+      "open source"
+      "cost optimization"
+      "monitoring"
+      "inference"
+      "neural networks"
+      "containers"
+      "observability"
+    )
+
+    # Wait for vLLM to be ready
+    echo "Waiting for vLLM to be ready..."
+    for i in {1..60}; do
+      if curl -s -f "${VLLM_ENDPOINT/\/v1\/chat\/completions//health}" > /dev/null 2>&1; then
+        echo "vLLM is ready!"
+        break
+      fi
+      echo "  Attempt ${i}/60: not ready yet..."
+      sleep 5
+    done
+
+    # Run load test with controlled concurrency
+    echo "Starting load generation..."
+    for ((i=1; i<=ITERATIONS; i++)); do
+      # Start concurrent requests
+      for ((j=0; j<CONCURRENCY; j++)); do
+        make_request $((i * CONCURRENCY + j)) &
+      done
+      
+      # Wait for this batch to complete
+      wait
+      
+      # Small delay between batches to allow metrics to update
+      sleep 2
+    done
+
+    echo "Load harness complete!"
+    echo "Total requests: $((ITERATIONS * CONCURRENCY))"
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: haiku-harness
+  namespace: vllm-inference
+  labels:
+    app: haiku-harness
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: haiku-harness
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: harness
+              image: curlimages/curl:8.10.1
+              command:
+                - /bin/sh
+                - /scripts/run-harness.sh
+              env:
+                - name: VLLM_ENDPOINT
+                  value: "http://vllm-inference:8000/v1/chat/completions"
+                - name: CONCURRENCY
+                  value: "3"
+                - name: ITERATIONS
+                  value: "20"
+                - name: MODEL
+                  value: "Qwen/Qwen2.5-1.5B-Instruct"
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "256Mi"
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+          volumes:
+            - name: scripts
+              configMap:
+                name: haiku-harness-script
+                defaultMode: 0555
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: haiku-harness-manual
+  namespace: vllm-inference
+  labels:
+    app: haiku-harness
+    job-type: manual
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: haiku-harness
+        job-type: manual
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: harness
+          image: curlimages/curl:8.10.1
+          command:
+            - /bin/sh
+            - /scripts/run-harness.sh
+          env:
+            - name: VLLM_ENDPOINT
+              value: "http://vllm-inference:8000/v1/chat/completions"
+            - name: CONCURRENCY
+              value: "3"
+            - name: ITERATIONS
+              value: "5"
+            - name: MODEL
+              value: "Qwen/Qwen2.5-1.5B-Instruct"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: haiku-harness-script
+            defaultMode: 0555
