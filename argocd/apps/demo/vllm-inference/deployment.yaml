@@ -1,0 +1,169 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-inference-config
+  namespace: vllm-inference
+data:
+  model: "Qwen/Qwen2.5-1.5B-Instruct"
+  max_model_len: "4096"
+  gpu_memory_utilization: "0.90"
+  dtype: "half"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-inference
+  namespace: vllm-inference
+  labels:
+    app: vllm-inference
+    llm-d.ai/model: "qwen2.5-1.5b-instruct"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-inference
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-inference
+        llm-d.ai/model: "qwen2.5-1.5b-instruct"
+    spec:
+      nodeSelector:
+        nvidia.com/gpu: "true"
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "present"
+          effect: "NoSchedule"
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.6.4.post1
+          args:
+            - --model
+            - $(MODEL)
+            - --max-model-len
+            - $(MAX_MODEL_LEN)
+            - --gpu-memory-utilization
+            - $(GPU_MEMORY_UTILIZATION)
+            - --dtype
+            - $(DTYPE)
+            - --port
+            - "8000"
+          env:
+            - name: MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: vllm-inference-config
+                  key: model
+            - name: MAX_MODEL_LEN
+              valueFrom:
+                configMapKeyRef:
+                  name: vllm-inference-config
+                  key: max_model_len
+            - name: GPU_MEMORY_UTILIZATION
+              valueFrom:
+                configMapKeyRef:
+                  name: vllm-inference-config
+                  key: gpu_memory_utilization
+            - name: DTYPE
+              valueFrom:
+                configMapKeyRef:
+                  name: vllm-inference-config
+                  key: dtype
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              cpu: "8000m"
+              memory: "24Gi"
+            requests:
+              nvidia.com/gpu: "1"
+              cpu: "4000m"
+              memory: "16Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /root/.cache/huggingface
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-inference
+  namespace: vllm-inference
+  labels:
+    app: vllm-inference
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-inference
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: vllm-inference
+  namespace: vllm-inference
+  labels:
+    app: vllm-inference
+spec:
+  selector:
+    matchLabels:
+      app: vllm-inference
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelConfigs:
+        # Add pod_uid from Kubernetes metadata
+        - sourceLabels: [__meta_kubernetes_pod_uid]
+          targetLabel: pod_uid
+          action: replace
+        # Add pod name
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+          action: replace
+        # Add namespace
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+          action: replace
