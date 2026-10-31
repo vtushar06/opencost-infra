@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-inference
+  namespace: vllm-inference
+  labels:
+    app: vllm-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-inference
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-inference
+        llm-d.ai/model: qwen2.5-1.5b-instruct
+    spec:
+      nodeSelector:
+        nvidia.com/gpu: "true"
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Equal"
+          value: "present"
+          effect: "NoSchedule"
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.32.0
+          args:
+            # 1.5B fp16 fits an A10 (24GiB). 4096 tokens keeps the KV cache small.
+            - --model
+            - Qwen/Qwen2.5-1.5B-Instruct
+            - --max-model-len
+            - "4096"
+            - --gpu-memory-utilization
+            - "0.90"
+            - --dtype
+            - half
+            - --port
+            - "8000"
+          env:
+            # uid 1000 cannot write /root/.cache.
+            - name: HOME
+              value: /cache
+            - name: HF_HOME
+              value: /cache/huggingface
+            - name: HF_HUB_CACHE
+              value: /cache/huggingface/hub
+            - name: XDG_CACHE_HOME
+              value: /cache/xdg
+            - name: VLLM_CACHE_ROOT
+              value: /cache/vllm
+            # Require-list in this tag stops at driver 575. gpu-operator 25.3.4
+            # installs 580.82.07, which is new enough for the image's CUDA 13.
+            - name: NVIDIA_DISABLE_REQUIRE
+              value: "true"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 4000m
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: 8000m
+              memory: 24Gi
+              nvidia.com/gpu: "1"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+        - name: cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-inference
+  namespace: vllm-inference
+  labels:
+    app: vllm-inference
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-inference
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: vllm-inference
+  namespace: vllm-inference
+  labels:
+    app: vllm-inference
+    # podMonitorSelectorNilUsesHelmValues stays at the chart default, so
+    # Prometheus only selects PodMonitors labeled for this Helm release.
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: vllm-inference
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_uid]
+          targetLabel: pod_uid
+          action: replace
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+          action: replace
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+          action: replace
